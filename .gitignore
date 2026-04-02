@@ -3,11 +3,18 @@ forge-installer.jar
 forge-installer.jar.log
 libraries/
 
+# Mods — managed separately, not committed
+mods/
+!mods/.gitkeep
+
 # Generated server data
 world/
 logs/
-config/
 crash-reports/
+eula.txt
+
+# Jar files
+*.jar
 
 # Player/server state
 banned-ips.json
