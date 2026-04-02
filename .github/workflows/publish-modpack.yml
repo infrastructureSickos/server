@@ -1,0 +1,191 @@
+name: Publish Modpack
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout server repo
+        uses: actions/checkout@v4
+
+      - name: Determine version ID
+        id: version
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            echo "version_id=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+            echo "version_type=release" >> "$GITHUB_OUTPUT"
+          else
+            SHORT_SHA="${GITHUB_SHA::8}"
+            echo "version_id=snapshot-${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+            echo "version_type=beta" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Fetch mod metadata from Modrinth and build modrinth.index.json
+        id: build_index
+        run: |
+          set -euo pipefail
+
+          VERSION_ID="${{ steps.version.outputs.version_id }}"
+          FILES_JSON="[]"
+
+          while IFS= read -r entry; do
+            version_id=$(echo "$entry" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['version_id'])")
+            mod_name=$(echo "$entry"  | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['name'])")
+
+            echo "Fetching metadata for: $mod_name ($version_id)"
+            api_resp=$(curl -sf "https://api.modrinth.com/v2/version/${version_id}")
+
+            primary_file=$(echo "$api_resp" | python3 -c "
+          import sys, json
+          data = json.load(sys.stdin)
+          f = next(f for f in data['files'] if f.get('primary', False))
+          print(json.dumps(f))
+          ")
+
+            file_entry=$(echo "$primary_file" | python3 -c "
+          import sys, json, urllib.request, hashlib
+
+          f = json.load(sys.stdin)
+          url = f['url']
+          filename = f['filename']
+
+          # Download to compute hashes and size
+          with urllib.request.urlopen(url) as resp:
+              data = resp.read()
+
+          sha1   = hashlib.sha1(data).hexdigest()
+          sha512 = hashlib.sha512(data).hexdigest()
+          size   = len(data)
+
+          entry = {
+              'path': 'mods/' + filename,
+              'hashes': {'sha1': sha1, 'sha512': sha512},
+              'fileSize': size,
+              'downloads': [url],
+              'env': {'client': 'optional', 'server': 'required'}
+          }
+          print(json.dumps(entry))
+          ")
+
+            FILES_JSON=$(echo "$FILES_JSON" | python3 -c "
+          import sys, json
+          arr = json.load(sys.stdin)
+          new = json.loads('''$(echo "$file_entry" | sed "s/'/'\\\\''/g")''')
+          arr.append(new)
+          print(json.dumps(arr))
+          ")
+
+          done < <(python3 -c "
+          import json
+          with open('mods-list.json') as f:
+              mods = json.load(f)
+          for m in mods:
+              print(json.dumps(m))
+          ")
+
+          python3 -c "
+          import json, sys
+          files = json.loads(sys.argv[1])
+          index = {
+              'game': 'minecraft',
+              'formatVersion': 1,
+              'versionId': '$VERSION_ID',
+              'name': 'InfrastructureSickos',
+              'files': files,
+              'dependencies': {}
+          }
+          print(json.dumps(index, indent=2))
+          " "$FILES_JSON" > modrinth.index.json
+
+          echo "Built modrinth.index.json with $(python3 -c "import json; print(len(json.load(open('modrinth.index.json'))['files']))") files"
+
+      - name: Assemble .mrpack
+        run: |
+          set -euo pipefail
+          mkdir -p mrpack-staging
+
+          cp modrinth.index.json mrpack-staging/
+
+          # Include overrides if present
+          for dir in kubejs config; do
+            if [ -d "$dir" ]; then
+              echo "Including overrides/$dir"
+              mkdir -p "mrpack-staging/overrides/$dir"
+              cp -r "$dir/." "mrpack-staging/overrides/$dir/"
+            fi
+          done
+
+          cd mrpack-staging
+          zip -r ../infrastructuresickos-${{ steps.version.outputs.version_id }}.mrpack .
+          cd ..
+          echo "Created mrpack: infrastructuresickos-${{ steps.version.outputs.version_id }}.mrpack"
+
+      - name: Publish to Modrinth
+        id: publish
+        env:
+          MODRINTH_API_TOKEN: ${{ secrets.MODRINTH_API_TOKEN }}
+          MODRINTH_PROJECT_ID: ${{ secrets.MODRINTH_PROJECT_ID }}
+        run: |
+          set -euo pipefail
+
+          VERSION_ID="${{ steps.version.outputs.version_id }}"
+          VERSION_TYPE="${{ steps.version.outputs.version_type }}"
+          MRPACK_FILE="infrastructuresickos-${VERSION_ID}.mrpack"
+
+          DATA=$(python3 -c "
+          import json
+          data = {
+              'name': 'InfrastructureSickos ${{ steps.version.outputs.version_id }}',
+              'version_number': '$VERSION_ID',
+              'version_type': '$VERSION_TYPE',
+              'project_id': '$MODRINTH_PROJECT_ID',
+              'dependencies': [],
+              'game_versions': [],
+              'loaders': ['forge'],
+              'featured': False,
+              'file_parts': ['mrpack']
+          }
+          print(json.dumps(data))
+          ")
+
+          RESPONSE=$(curl -sf \
+            -H "Authorization: ${MODRINTH_API_TOKEN}" \
+            -F "data=${DATA}" \
+            -F "mrpack=@${MRPACK_FILE};type=application/zip;filename=${MRPACK_FILE}" \
+            "https://api.modrinth.com/v2/version")
+
+          MODRINTH_VERSION_ID=$(echo "$RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
+          echo "Published Modrinth version: $MODRINTH_VERSION_ID"
+          echo "modrinth_version_id=${MODRINTH_VERSION_ID}" >> "$GITHUB_OUTPUT"
+
+      - name: Update modrinth-version.txt
+        env:
+          MODRINTH_VERSION_ID: ${{ steps.publish.outputs.modrinth_version_id }}
+        run: |
+          echo "${MODRINTH_VERSION_ID}" > modrinth-version.txt
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add modrinth-version.txt
+          git commit -m "chore: update modrinth-version.txt to ${MODRINTH_VERSION_ID} [skip ci]"
+          git push
+
+      - name: Trigger deploy workflow
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'deploy.yml',
+              ref: context.ref
+            });
