@@ -1,3 +1,7 @@
+# InfrastructureSickos Server
+
+[![Deploy Server](https://github.com/infrastructureSickos/server/actions/workflows/deploy.yml/badge.svg)](https://github.com/infrastructureSickos/server/actions/workflows/deploy.yml)
+
 # KubeJS Scripts
 
 This directory contains KubeJS scripts for InfrastructureSickos recipe tweaks and progression gating.
