@@ -1,0 +1,18 @@
+# Forge server binaries and installer
+forge-installer.jar
+forge-installer.jar.log
+libraries/
+
+# Generated server data
+world/
+logs/
+config/
+crash-reports/
+
+# Player/server state
+banned-ips.json
+banned-players.json
+ops.json
+whitelist.json
+usercache.json
+run.bat
