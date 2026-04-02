@@ -57,13 +57,12 @@ jobs:
 
       - name: Assemble server package
         run: |
-          mkdir -p server-package/mods
+          mkdir -p server-package/mods server-package/kubejs
           cp mods/*.jar server-package/mods/
-          cp -r kubejs/ server-package/kubejs/
-          cp -r config/ server-package/config/
+          cp -r client_scripts/ server-package/kubejs/client_scripts/
+          cp -r server_scripts/ server-package/kubejs/server_scripts/
+          cp -r startup_scripts/ server-package/kubejs/startup_scripts/
           cp server.properties server-package/server.properties
-          cp ops.json server-package/ops.json
-          cp whitelist.json server-package/whitelist.json
           tar -czf server-package.tar.gz server-package/
 
       - name: Upload server package artifact
