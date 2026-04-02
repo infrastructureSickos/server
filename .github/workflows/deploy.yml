@@ -26,14 +26,14 @@ jobs:
         uses: gradle/actions/setup-gradle@v3
 
       - name: Build custom mods
-        working-directory: custom-mods-repo
+        working-directory: custom-mods-repo/Organizations/infrastructureSickos/InfrastructureSickos
         run: ./gradlew build
 
       - name: Upload custom mod JARs
         uses: actions/upload-artifact@v4
         with:
           name: custom-mods
-          path: custom-mods-repo/*/build/libs/*.jar
+          path: custom-mods-repo/Organizations/infrastructureSickos/InfrastructureSickos/*/build/libs/*.jar
 
   assemble:
     runs-on: ubuntu-latest
