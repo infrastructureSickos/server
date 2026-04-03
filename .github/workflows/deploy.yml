@@ -7,108 +7,67 @@ on:
   workflow_dispatch:
 
 jobs:
-  build-mods:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout custom mods monorepo
-        uses: actions/checkout@v4
-        with:
-          repository: infrastructureSickos/InfrastructureSickos
-          path: custom-mods-repo
-
-      - name: Set up JDK
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: 17
-
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v3
-
-      - name: Build custom mods
-        working-directory: custom-mods-repo/Organizations/infrastructureSickos/InfrastructureSickos
-        run: ./gradlew build
-
-      - name: Upload custom mod JARs
-        uses: actions/upload-artifact@v4
-        with:
-          name: custom-mods
-          path: custom-mods-repo/Organizations/infrastructureSickos/InfrastructureSickos/*/build/libs/*.jar
-
-  assemble:
-    runs-on: ubuntu-latest
-    needs: build-mods
-    steps:
-      - name: Checkout server repo
-        uses: actions/checkout@v4
-
-      - name: Download custom mods artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: custom-mods
-          path: mods/
-
-      - name: Download 3rd-party mods from Modrinth
-        run: |
-          mkdir -p mods
-          jq -r '.[] | "\(.version_id) \(.name)"' mods-list.json | while read version_id mod_name; do
-            echo "Downloading: $mod_name ($version_id)"
-            download_url=$(curl -sf "https://api.modrinth.com/v2/version/${version_id}" | jq -r '.files[] | select(.primary == true) | .url')
-            filename=$(curl -sf "https://api.modrinth.com/v2/version/${version_id}" | jq -r '.files[] | select(.primary == true) | .filename')
-            curl -fL -o "mods/${filename}" "${download_url}"
-          done
-
-      - name: Assemble server package
-        run: |
-          mkdir -p server-package/mods server-package/kubejs
-          cp mods/*.jar server-package/mods/
-          cp -r client_scripts/ server-package/kubejs/client_scripts/
-          cp -r server_scripts/ server-package/kubejs/server_scripts/
-          cp -r startup_scripts/ server-package/kubejs/startup_scripts/
-          cp server.properties server-package/server.properties
-          tar -czf server-package.tar.gz server-package/
-
-      - name: Upload server package artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: server-package
-          path: server-package.tar.gz
-
   deploy:
     runs-on: ubuntu-latest
-    needs: assemble
     steps:
-      - name: Download server package artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: server-package
-
-      - name: Upload tarball to server
+      - name: Setup SSH key
         run: |
           echo "${{ secrets.LINODE_SSH_KEY }}" > /tmp/deploy_key
           chmod 600 /tmp/deploy_key
-          scp -i /tmp/deploy_key -o StrictHostKeyChecking=no \
-            server-package.tar.gz \
-            ${{ secrets.LINODE_USER }}@${{ secrets.LINODE_HOST }}:/tmp/server-package.tar.gz
 
-      - name: Run deploy script remotely
+      - name: Deploy to Linode
         run: |
           ssh -i /tmp/deploy_key -o StrictHostKeyChecking=no \
-            ${{ secrets.LINODE_USER }}@${{ secrets.LINODE_HOST }} \
-            "bash /opt/minecraft/scripts/deploy.sh"
+            ${{ secrets.LINODE_USER }}@${{ secrets.LINODE_HOST }} 'bash -s' << 'ENDSSH'
+          set -euo pipefail
 
-      - name: Health check
-        run: |
-          for i in $(seq 1 30); do
-            if nc -z ${{ secrets.LINODE_HOST }} 25565; then
-              echo "Server is up!"
-              exit 0
-            fi
-            echo "Attempt $i/30: server not yet up, waiting 10s..."
-            sleep 10
-          done
-          echo "Health check failed after 30 attempts"
-          exit 1
+          cd /opt/minecraft
+
+          echo "Pulling latest server repo..."
+          git pull
+
+          echo "Downloading mod JARs from Modrinth..."
+          mkdir -p mods
+
+          python3 - << 'PYEOF'
+import json
+import urllib.request
+import os
+
+with open('mods-list.json') as f:
+    mods = json.load(f)
+
+downloaded = set()
+for mod in mods:
+    version_id = mod['version_id']
+    mod_name = mod['name']
+    print(f"Downloading: {mod_name} ({version_id})")
+
+    with urllib.request.urlopen(f"https://api.modrinth.com/v2/version/{version_id}") as resp:
+        data = json.load(resp)
+
+    primary = next(f for f in data['files'] if f.get('primary', False))
+    url = primary['url']
+    filename = primary['filename']
+    dest = f"mods/{filename}"
+
+    with urllib.request.urlopen(url) as resp:
+        jar_data = resp.read()
+
+    with open(dest, 'wb') as f:
+        f.write(jar_data)
+
+    downloaded.add(filename)
+    print(f"  -> {dest}")
+
+print(f"Downloaded {len(mods)} mods")
+PYEOF
+
+          echo "Restarting Forge server..."
+          sudo systemctl restart minecraft-server
+
+          echo "Deploy complete."
+          ENDSSH
 
       - name: Cleanup SSH key
         if: always()
